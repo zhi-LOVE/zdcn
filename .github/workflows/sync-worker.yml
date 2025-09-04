@@ -1,0 +1,74 @@
+name: Daily Sync _worker.js from cmliu/edgetunnel
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天 UTC 零点运行
+  workflow_dispatch:      # 支持手动触发
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-worker
+  cancel-in-progress: true
+
+jobs:
+  sync-worker:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: https://github.com/cmliu/edgetunnel
+      UPSTREAM_FILE: _worker.js
+
+    steps:
+      - name: 检出当前仓库代码
+        uses: actions/checkout@v4
+
+      - name: 获取上游最新 commit SHA
+        id: get_sha
+        run: |
+          set -euo pipefail
+          git ls-remote "$UPSTREAM_REPO" HEAD | awk '{print $1}' > upstream_sha.txt
+          echo "sha=$(cat upstream_sha.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: 检查是否需要更新
+        id: check_update
+        run: |
+          set -euo pipefail
+          if [ ! -f version.txt ]; then
+            echo "首次运行，需更新"
+            echo "need_update=true" >> "$GITHUB_OUTPUT"
+          elif ! cmp -s upstream_sha.txt version.txt; then
+            echo "上游有新版本，需更新"
+            echo "need_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "版本未变，无需更新"
+            echo "need_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 同步 _worker.js 并更新 version.txt
+        if: steps.check_update.outputs.need_update == 'true'
+        id: sync
+        run: |
+          set -euo pipefail
+          git clone --depth=1 "$UPSTREAM_REPO" upstream_repo
+          if [ ! -f "upstream_repo/$UPSTREAM_FILE" ]; then
+            echo "上游仓库未找到 $UPSTREAM_FILE" >&2
+            exit 1
+          fi
+          cp "upstream_repo/$UPSTREAM_FILE" "$UPSTREAM_FILE"
+          cp upstream_sha.txt version.txt
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: 提交并推送变更
+        if: steps.sync.outputs.updated == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$UPSTREAM_FILE" version.txt
+          if git diff --cached --quiet; then
+            echo "无变化，无需提交"
+            exit 0
+          fi
+          git commit -m "自动同步 $UPSTREAM_FILE，上游版本 $(cut -c1-7 version.txt)"
+          git push
